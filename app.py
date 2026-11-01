@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import io
 import re
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from datetime import date
 
 import openpyxl
@@ -885,6 +885,7 @@ DEFAULT_PROMPT_PERF = """Ты — опытный заместитель дире
 
 3. РЕЗЕРВ
    - Бір пәннен «4» — резерв оқу озаттары; бір пәннен «3» — резерв білім сапасы.
+   - Для каждой параллели: сколько учеников с одной «4» и с одной «3», какой это % от учеников, от екпінділер и от үлгерушілер.
    - Посчитай, каким станет качество школы и каждой параллели, если резерв будет реализован.
    - В каких параллелях работа с резервом даст наибольший эффект.
 
@@ -1032,7 +1033,15 @@ def compute_perf(data: dict) -> dict:
             notes.append(f"білім сапасы: кестеде {r['quality_stated']:.2f}%, есептелгені {q:.2f}%")
         if r["progress_stated"] is not None and abs(r["progress_stated"] - p) > 0.05:
             notes.append(f"үлгерім: кестеде {r['progress_stated']:.2f}%, есептелгені {p:.2f}%")
+        if r["one4"] > r["good"]:
+            notes.append(f"бір пәннен «4» ({r['one4']}) екпінділер санынан ({r['good']}) көп болмауы керек")
+        if r["one3"] > r["satisf"]:
+            notes.append(f"бір пәннен «3» ({r['one3']}) үлгерушілер санынан ({r['satisf']}) көп болмауы керек")
         return {**r, "quality_calc": q, "progress_calc": p,
+                "one4_pct": r["one4"] / n * 100, "one3_pct": r["one3"] / n * 100,
+                "one4_of_good": r["one4"] / r["good"] * 100 if r["good"] else None,
+                "one3_of_satisf": r["one3"] / r["satisf"] * 100 if r["satisf"] else None,
+                "pot_ex_pct": (r["excellent"] + r["one4"]) / n * 100,
                 "ex_pct": r["excellent"] / n * 100, "sat_pct": r["satisf"] / n * 100,
                 "pot_quality": (r["excellent"] + r["good"] + r["one3"]) / n * 100,
                 "pot_excellent": r["excellent"] + r["one4"], "notes": "; ".join(notes)}
@@ -1108,19 +1117,30 @@ def local_perf(data: dict, calc: dict) -> str:
         for name, s in calc["stages"].items():
             L.append(f"- {name}: {s['n']} оқушы, білім сапасы {s['quality']:.1f}%")
 
-    L.append("### Резерв")
-    top4 = max(calc["table"], key=lambda t: t["one4"])
-    top3 = max(calc["table"], key=lambda t: t["one3"])
-    L.append(f"- Бір пәннен «4» – **{T['one4']}** оқушы (оқу озаттарының резерві). "
-             f"Ең көбі: {plabel(top4['parallel'])} ({top4['one4']}).")
-    L.append(f"- Бір пәннен «3» – **{T['one3']}** оқушы (білім сапасының резерві). "
-             f"Ең көбі: {plabel(top3['parallel'])} ({top3['one3']}).")
-    L.append(f"- Резерв толық іске асса: мектептің білім сапасы {T['quality_calc']:.1f}% → "
-             f"**{T['pot_quality']:.1f}%**, оқу озаттары {T['excellent']} → **{T['pot_excellent']}**.")
-    for t in sorted(calc["table"], key=lambda t: -(t["pot_quality"] - t["quality_calc"])):
-        if t["one3"] or t["one4"]:
-            L.append(f"  - {plabel(t['parallel'])}: сапа {t['quality_calc']:.1f}% → {t['pot_quality']:.1f}%, "
-                     f"озаттар {t['excellent']} → {t['pot_excellent']}")
+    L.append("### Резерв: бір пәннен «4» және бір пәннен «3»")
+    of = lambda x: "—" if x is None else f"{x:.0f}%"
+    L.append(f"- **Бір пәннен «4»** – мектеп бойынша **{T['one4']}** оқушы ({T['one4_pct']:.1f}%), бұл "
+             f"екпінділердің {of(T['one4_of_good'])}. Бұл оқушылар бір ғана пәннен «4»-ті «5»-ке түзетсе, "
+             f"оқу озаты болады: {T['excellent']} → **{T['pot_excellent']}** "
+             f"({T['ex_pct']:.1f}% → {T['pot_ex_pct']:.1f}%).")
+    L.append(f"- **Бір пәннен «3»** – мектеп бойынша **{T['one3']}** оқушы ({T['one3_pct']:.1f}%), бұл "
+             f"үлгерушілердің {of(T['one3_of_satisf'])}. Бір «3»-ті «4»-ке түзетсе, екпінді болады: "
+             f"білім сапасы {T['quality_calc']:.1f}% → **{T['pot_quality']:.1f}%** "
+             f"(+{T['pot_quality'] - T['quality_calc']:.1f} п.п.).")
+    L.append("- Параллельдер бойынша:")
+    for t in calc["table"]:
+        L.append(f"  - **{plabel(t['parallel'])}**: бір «4» – {t['one4']} ({t['one4_pct']:.1f}%), "
+                 f"бір «3» – {t['one3']} ({t['one3_pct']:.1f}%); озаттар {t['excellent']} → {t['pot_excellent']}, "
+                 f"сапа {t['quality_calc']:.1f}% → {t['pot_quality']:.1f}%")
+    top4 = sorted(calc["table"], key=lambda t: -t["one4"])[:2]
+    top3 = sorted(calc["table"], key=lambda t: -(t["pot_quality"] - t["quality_calc"]))[:2]
+    if T["one4"]:
+        L.append("- Озаттар резерві ең көп: " + ", ".join(f"{plabel(t['parallel'])} ({t['one4']})" for t in top4
+                                                         if t["one4"]) + ".")
+    if T["one3"]:
+        L.append("- Бір «3»-пен жұмыс сапаны ең көп көтереді: " + ", ".join(
+            f"{plabel(t['parallel'])} (+{t['pot_quality'] - t['quality_calc']:.1f} п.п.)" for t in top3
+            if t["one3"]) + ".")
 
     statuses = {t["status"] for t in calc["table"] if t["status"]}
     if statuses:
@@ -1144,6 +1164,12 @@ def perf_as_text(data: dict, calc: dict) -> str:
                  f"{t['satisf']} | {t['fail']} | {t['noatt']} | {t['tmp']} | {t['one4']} | {t['one3']} | "
                  f"{f(t['quality_stated'])} | {f(t['quality_calc'])} | {f(t['progress_stated'])} | "
                  f"{f(t['progress_calc'])} | {f(t['avg'])} | {f(t['pot_quality'])}")
+    L += ["", "Резерв (бағдарлама есебі): Параллель | Бір пәннен «4» | % оқушылардан | % екпінділерден | "
+              "Бір пәннен «3» | % оқушылардан | % үлгерушілерден | Озаттар қазір → резервпен | Сапа % қазір → резервпен"]
+    for t in calc["table"] + [calc["total"]]:
+        L.append(f"{t['parallel']} | {t['one4']} | {f(t['one4_pct'], 1)} | {f(t['one4_of_good'], 1)} | {t['one3']} | "
+                 f"{f(t['one3_pct'], 1)} | {f(t['one3_of_satisf'], 1)} | {t['excellent']} → {t['pot_excellent']} | "
+                 f"{f(t['quality_calc'], 1)} → {f(t['pot_quality'], 1)}")
     if calc["w_avg"] is not None:
         L.append(f"\nОқушы санына қарай есептелген мектептің орташа баллы: {calc['w_avg']:.3f}")
     if calc["stages"]:
@@ -1179,6 +1205,14 @@ def _new_doc():
     return doc
 
 
+def perf_reserve_rows(calc):
+    f = lambda x: "—" if x is None else f"{x:.1f}"
+    return [[plabel(t["parallel"]) if t is not calc["total"] else "Барлығы", t["one4"], f(t["one4_pct"]),
+             f(t["one4_of_good"]), t["one3"], f(t["one3_pct"]), f(t["one3_of_satisf"]),
+             f"{t['excellent']} → {t['pot_excellent']}", f"{f(t['quality_calc'])} → {f(t['pot_quality'])}"]
+            for t in calc["table"] + [calc["total"]]]
+
+
 def build_docx_perf(data, calc, local_md, ai_md, period="") -> bytes:
     doc = _new_doc()
     p = doc.add_paragraph()
@@ -1208,6 +1242,11 @@ def build_docx_perf(data, calc, local_md, ai_md, period="") -> bytes:
            widths=[3.0, 1.5, 1.6, 1.6, 1.8, 2.0, 1.8, 1.8, 2.0, 1.8, 1.7, 1.7, 2.0])
     doc.add_paragraph("Жасыл — мектеп орташасынан жоғары, қызыл — төмен; сары — кестедегі мән есептелгенмен "
                       "сәйкес келмейді.")
+    doc.add_heading("Резерв: бір пәннен «4» және бір пәннен «3»", level=2)
+    _table(doc, ["Параллель", "Бір пәннен «4»", "% оқушылардан", "% екпінділерден", "Бір пәннен «3»",
+                 "% оқушылардан", "% үлгерушілерден", "Озаттар: қазір → резервпен", "Сапа %: қазір → резервпен"],
+           perf_reserve_rows(calc), font=9, widths=[3.0, 2.0, 2.0, 2.2, 2.0, 2.0, 2.4, 3.2, 3.2])
+    doc.add_paragraph()
     md_to_docx(doc, local_md)
     if ai_md:
         doc.add_page_break()
@@ -1268,6 +1307,28 @@ def build_xlsx_perf(file_bytes, data, calc, local_md, ai_md) -> bytes:
     for i, wd in enumerate([16, 8, 9, 9, 10, 11, 10, 10, 11, 12, 12, 10, 9, 10, 11, 11, 50], 1):
         w.column_dimensions[get_column_letter(i)].width = wd
     w.freeze_panes = "B2"
+
+    wr = wb.create_sheet("Резерв")
+    wr.append(["Параллель", "Оқушы", "Бір пәннен «4»", "% оқушылардан", "% екпінділерден", "Бір пәннен «3»",
+               "% оқушылардан", "% үлгерушілерден", "Озаттар қазір", "Озаттар резервпен", "Сапа % қазір",
+               "Сапа % резервпен", "Сапа өсімі, п.п."])
+    for c in wr[1]:
+        c.font, c.fill, c.border, c.alignment = Font(bold=True), HEAD_FILL, BORDER, WRAP
+    for t in calc["table"] + [calc["total"]]:
+        is_total = t is calc["total"]
+        wr.append([plabel(t["parallel"]) if not is_total else "Барлығы", t["n"], t["one4"], pc(t["one4_pct"]),
+                   pc(t["one4_of_good"]), t["one3"], pc(t["one3_pct"]), pc(t["one3_of_satisf"]), t["excellent"],
+                   t["pot_excellent"], pc(t["quality_calc"]), pc(t["pot_quality"]),
+                   round(t["pot_quality"] - t["quality_calc"], 1)])
+        for c in wr[wr.max_row]:
+            c.border = BORDER
+            if is_total:
+                c.font = Font(bold=True)
+        for col in (4, 5, 7, 8, 11, 12):
+            wr.cell(row=wr.max_row, column=col).number_format = "0.0%"
+    for i, wd in enumerate([16, 8, 11, 11, 12, 11, 11, 13, 10, 12, 10, 12, 12], 1):
+        wr.column_dimensions[get_column_letter(i)].width = wd
+    wr.freeze_panes = "B2"
     _md_sheets(wb, local_md, ai_md)
     buf = io.BytesIO()
     wb.save(buf)
@@ -1543,11 +1604,18 @@ def render_perf(item, api_key, model_id, prefix):
 
     with tab2:
         st.dataframe(pd.DataFrame([{
-            "Параллель": plabel(t["parallel"]), "Бір пәннен «4»": t["one4"], "Бір пәннен «3»": t["one3"],
+            "Параллель": plabel(t["parallel"]), "Бір пәннен «4»": t["one4"],
+            "«4»: % оқушылардан": round(t["one4_pct"], 1),
+            "«4»: % екпінділерден": None if t["one4_of_good"] is None else round(t["one4_of_good"], 1),
+            "Бір пәннен «3»": t["one3"], "«3»: % оқушылардан": round(t["one3_pct"], 1),
+            "«3»: % үлгерушілерден": None if t["one3_of_satisf"] is None else round(t["one3_of_satisf"], 1),
             "Сапа % сейчас": round(t["quality_calc"], 1), "Сапа % с резервом": round(t["pot_quality"], 1),
             "Озаттар сейчас": t["excellent"], "Озаттар с резервом": t["pot_excellent"],
         } for t in calc["table"] + [calc["total"]]]), use_container_width=True, hide_index=True)
-        st.markdown(local_md.split("### Резерв", 1)[1].split("###")[0])
+        st.bar_chart(pd.DataFrame([{"Параллель": plabel(t["parallel"]), "Бір пәннен «4»": t["one4"],
+                                    "Бір пәннен «3»": t["one3"]} for t in calc["table"]]).set_index("Параллель"),
+                     stack=False, color=["#6aa84f", "#f6b26b"])
+        st.markdown(local_md.split("### Резерв", 1)[1].split("###")[0].split("\n", 1)[1])
 
     with tab3:
         for c in calc["checks"]:
@@ -2200,6 +2268,7 @@ DEFAULT_PROMPT_CLASS = """Ты — опытный заместитель дир�
 3. АНАЛИЗ ПО УЧЕНИКАМ
    - Таблица: Аты-жөні | Орта балл | Саны «5» | Саны «4» | Қай пәндерден «4» | Санаты.
    - Резерв үздіктер: ученики с одной «4», а также с двумя–тремя «4» (ближайший резерв). Укажи по каким предметам.
+   - Сколько учеников имеют одну «4» и одну «3», по каким предметам; распределение учеников по количеству «4» (0, 1, 2, 3 …) и «3».
    - Ученики с самым низким средним баллом и предметы, где им нужна помощь.
    - Есть ли закономерности (одни и те же ученики получают «4» по одним и тем же предметам).
 
@@ -2487,8 +2556,25 @@ def compute_class(data: dict) -> dict:
         for sb in r["f4"]:
             pattern[sb] = pattern.get(sb, 0) + 1
     pattern = OrderedDict(sorted(pattern.items(), key=lambda x: -x[1]))
+    # Сколько у кого «4» / «3» и по каким предметам бір «4» / бір «3»
+    no3 = [r for r in studs if not r["f3"] and not r["f2"]]
+    no2 = [r for r in studs if not r["f2"]]
+    dist4 = OrderedDict(sorted(Counter(len(r["f4"]) for r in no3).items()))
+    dist3 = OrderedDict(sorted(Counter(len(r["f3"]) for r in no2 if r["f3"]).items()))
+    one3 = [r for r in studs if r["reserve"].startswith("Екпінді резерві")]
+    subj_res = []
+    for d in subj:
+        sb = d["subject"]
+        if d["pass_fail"]:
+            continue
+        subj_res.append({"subject": sb,
+                         "one4": [r["name"] for r in one4 if r["f4"] == [sb]],
+                         "one3": [r["name"] for r in one3 if r["f3"] == [sb]],
+                         "near4": [r["name"] for r in near if sb in r["f4"]],
+                         "c4": d["c4"], "c3": d["c3"]})
     return {"students": studs, "subjects": subj, "class": cls, "cats": cats, "checks": checks,
-            "pot": pot, "pattern": pattern, "one4": one4, "near": near}
+            "pot": pot, "pattern": pattern, "one4": one4, "near": near, "one3": one3,
+            "dist4": dist4, "dist3": dist3, "subj_res": subj_res}
 
 
 def class_title(data) -> str:
@@ -2529,6 +2615,23 @@ def local_class(data, calc) -> str:
                                                    else f"«4» – {len(r['f4'])} пәннен, «3» – {len(r['f3'])}") + ")"
             for r in low) + ".")
 
+    L.append("### Бір пәннен «4» және бір пәннен «3»")
+    L.append(f"- **Бір пәннен «4»**: {len(calc['one4'])} оқушы ({len(calc['one4']) / n * 100:.1f}%)"
+             + (" — " + "; ".join(f"{r['name']} ({r['f4'][0]})" for r in calc["one4"]) if calc["one4"] else "") + ".")
+    L.append(f"- **Бір пәннен «3»**: {len(calc['one3'])} оқушы ({len(calc['one3']) / n * 100:.1f}%)"
+             + (" — " + "; ".join(f"{r['name']} ({r['f3'][0]})" for r in calc["one3"]) if calc["one3"] else "") + ".")
+    if calc["dist4"]:
+        L.append("- «3»-сіз оқушылардың «4» саны бойынша бөлінуі: " + "; ".join(
+            f"{k} пәннен «4» – {v} оқушы" if k else f"«4»-сіз (үздік) – {v} оқушы"
+            for k, v in calc["dist4"].items()) + ".")
+    if calc["dist3"]:
+        L.append("- «3» алған оқушылар: " + "; ".join(f"{k} пәннен «3» – {v} оқушы" for k, v in calc["dist3"].items()) + ".")
+    hits = [d for d in calc["subj_res"] if d["one4"] or d["one3"]]
+    if hits:
+        L.append("- Бір «4» / бір «3» қай пәннен: " + "; ".join(
+            f"{d['subject']} – " + ", ".join(x for x in (f"бір «4»: {len(d['one4'])}" if d["one4"] else "",
+                                                       f"бір «3»: {len(d['one3'])}" if d["one3"] else "") if x)
+            for d in hits) + ".")
     L.append("### Резерв")
     if calc["one4"]:
         L.append("- Үздік резерві (бір «4»): " + "; ".join(f"{r['name']} – {r['f4'][0]}" for r in calc["one4"]))
@@ -2583,6 +2686,15 @@ def class_as_text(data, calc) -> str:
     if data["cats_stated"]:
         L.append("Кестедегі санаттар тізімі: " + "; ".join(
             f"{k}: {v['count']} ({', '.join(v['names'])})" for k, v in data["cats_stated"].items()))
+    L.append("Бір пәннен «4»: " + (", ".join(f"{r['name']} ({r['f4'][0]})" for r in calc["one4"]) or "жоқ"))
+    L.append("Бір пәннен «3»: " + (", ".join(f"{r['name']} ({r['f3'][0]})" for r in calc["one3"]) or "жоқ"))
+    L.append("«4» саны бойынша бөліну («3»-сіз оқушылар): " + "; ".join(
+        f"{k} «4» – {v} оқушы" for k, v in calc["dist4"].items()))
+    if calc["dist3"]:
+        L.append("«3» саны бойынша бөліну: " + "; ".join(f"{k} «3» – {v} оқушы" for k, v in calc["dist3"].items()))
+    L.append("Пәндер бойынша резерв: Пән | бір «4» (тек осы пәннен) | бір «3» | жақын резервтегі «4» | барлық «4» | барлық «3»")
+    for d in calc["subj_res"]:
+        L.append(f"{d['subject']} | {len(d['one4'])} | {len(d['one3'])} | {len(d['near4'])} | {d['c4']} | {d['c3']}")
     P = calc["pot"]
     L.append(f"Әлеует: үздіктер қазір {P['uzdik_now']}, бір «4» түзетілсе {P['uzdik_one4']}, жақын резерв "
              f"(2–3 «4») түзетілсе {P['uzdik_near']}; орташа балл {f(C['avg'])} → {f(P['avg_one4'])} → "
@@ -2648,6 +2760,22 @@ def build_docx_class(data, calc, local_md, ai_md) -> bytes:
         colors.append([None] * 7 + ["FFF2CC" if r["reserve"] else None])
     _table(doc, ["Аты-жөні", "Орта балл", "«5»", "«4»", "«4» пәндері", "«3»/«2» пәндері", "Санаты", "Резерв"],
            rows, font=8, colors=colors, widths=[4.2, 1.6, 1.0, 1.0, 7.0, 3.5, 2.0, 3.8])
+
+    doc.add_heading("Бір пәннен «4» және бір пәннен «3»", level=2)
+    _add_runs(doc.add_paragraph(), f"**Бір пәннен «4»:** {len(calc['one4'])} оқушы"
+              + (" — " + "; ".join(f"{r['name']} ({r['f4'][0]})" for r in calc["one4"]) if calc["one4"] else ""))
+    _add_runs(doc.add_paragraph(), f"**Бір пәннен «3»:** {len(calc['one3'])} оқушы"
+              + (" — " + "; ".join(f"{r['name']} ({r['f3'][0]})" for r in calc["one3"]) if calc["one3"] else ""))
+    _table(doc, ["Пән", "Бір «4» (тек осы пәннен)", "Бір «3» (тек осы пәннен)", "Жақын резервтегі «4»",
+                 "Барлық «4»", "Барлық «3»", "Оқушылар (бір «4» / бір «3»)"],
+           [[d["subject"], len(d["one4"]), len(d["one3"]), len(d["near4"]), d["c4"], d["c3"],
+             ", ".join(d["one4"] + d["one3"]) or "—"] for d in calc["subj_res"]],
+           font=9, widths=[6.0, 2.4, 2.4, 2.4, 1.8, 1.8, 7.0])
+    doc.add_paragraph()
+    _table(doc, ["«4» саны («3»-сіз оқушылар)", "Оқушылар саны", "Кімдер"],
+           [[("0 (үздік)" if k == 0 else k), v,
+             ", ".join(r["name"] for r in calc["students"] if not r["f3"] and not r["f2"] and len(r["f4"]) == k)]
+            for k, v in calc["dist4"].items()], font=9, widths=[4.5, 3.0, 17.0])
     doc.add_paragraph()
     md_to_docx(doc, local_md)
     if ai_md:
@@ -2690,6 +2818,22 @@ def build_xlsx_class(file_bytes, data, calc, local_md, ai_md) -> bytes:
     w2.column_dimensions["A"].width = 40
     w2.column_dimensions["K"].width = 40
 
+    wr = wb.create_sheet("Резерв")
+    wr.append(["Пән", "Бір «4» (тек осы пәннен)", "Бір «3» (тек осы пәннен)", "Жақын резервтегі «4»",
+               "Барлық «4»", "Барлық «3»", "Бір «4» алғандар", "Бір «3» алғандар", "Жақын резерв"])
+    for d in calc["subj_res"]:
+        wr.append([d["subject"], len(d["one4"]), len(d["one3"]), len(d["near4"]), d["c4"], d["c3"],
+                   ", ".join(d["one4"]), ", ".join(d["one3"]), ", ".join(d["near4"])])
+    wr.append([])
+    wr.append(["«4» саны («3»-сіз оқушылар)", "Оқушылар саны", "Кімдер"])
+    for c in wr[wr.max_row]:
+        c.font, c.fill, c.border = Font(bold=True), HEAD_FILL, BORDER
+    for k, v in calc["dist4"].items():
+        wr.append(["0 (үздік)" if k == 0 else k, v, ", ".join(
+            r["name"] for r in calc["students"] if not r["f3"] and not r["f2"] and len(r["f4"]) == k)])
+    for i, wd in enumerate([40, 14, 14, 14, 10, 10, 40, 40, 50], 1):
+        wr.column_dimensions[get_column_letter(i)].width = wd
+
     w3 = wb.create_sheet("Тексеру")
     w3.append(["Табылған сәйкессіздіктер"])
     for c in calc["checks"] or ["Сәйкессіздік табылған жоқ."]:
@@ -2697,7 +2841,7 @@ def build_xlsx_class(file_bytes, data, calc, local_md, ai_md) -> bytes:
         w3.cell(row=w3.max_row, column=1).alignment = WRAP
     w3.column_dimensions["A"].width = 140
 
-    for ws in (w, w2, w3):
+    for ws in (w, w2, wr, w3):
         for c in ws[1]:
             c.font, c.fill, c.border, c.alignment = Font(bold=True), HEAD_FILL, BORDER, WRAP
         ws.freeze_panes = "B2" if ws is not w3 else None
@@ -2739,7 +2883,13 @@ def render_class(item, api_key, model_id, prefix):
             "«3»/«2» пәндері": ", ".join(r["f3"] + r["f2"]), "Санаты": r["cat"], "Резерв": r["reserve"],
         } for r in sorted(calc["students"], key=lambda r: -(r["avg"] or 0))]),
             use_container_width=True, hide_index=True)
-        st.markdown(local_md.split("### Резерв", 1)[1].split("### Деректерді тексеру")[0])
+        st.subheader("Бір пәннен «4» және бір пәннен «3» — пәндер бойынша")
+        st.dataframe(pd.DataFrame([{
+            "Пән": d["subject"], "Бір «4»": len(d["one4"]), "Бір «3»": len(d["one3"]),
+            "Жақын резервтегі «4»": len(d["near4"]), "Барлық «4»": d["c4"], "Барлық «3»": d["c3"],
+            "Оқушылар": ", ".join(d["one4"] + d["one3"]),
+        } for d in calc["subj_res"]]), use_container_width=True, hide_index=True)
+        st.markdown(local_md.split("### Бір пәннен «4» және бір пәннен «3»", 1)[1].split("### Деректерді тексеру")[0])
     with t3:
         graded = [d for d in calc["subjects"] if not d["pass_fail"] and d["n"]]
         st.dataframe(pd.DataFrame([{
